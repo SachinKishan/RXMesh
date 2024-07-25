@@ -10,8 +10,8 @@
 
 template <typename T, uint32_t blockThreads>
 __global__ static void compute_vertex_normal(const rxmesh::Context      context,
-                                             rxmesh::VertexAttribute<T> coords,
-                                             rxmesh::VertexAttribute<T> normals)
+                                             rxmesh::VertexAttribute<T> coords, //in
+                                             rxmesh::VertexAttribute<T> normals) //out
 {
     using namespace rxmesh;
 
@@ -86,6 +86,8 @@ int main(int argc, char** argv)
     rx.prepare_launch_box({rxmesh::Op::FV},
                           launch_box,
                           (void*)compute_vertex_normal<float, CUDABlockSize>);
+
+
     compute_vertex_normal<float, CUDABlockSize><<<launch_box.blocks,
                                                   launch_box.num_threads,
                                                   launch_box.smem_bytes_dyn>>>(
