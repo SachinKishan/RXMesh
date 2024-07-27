@@ -110,7 +110,8 @@ __host__ __device__ Eigen::Matrix3f calculateSVD(Eigen::Matrix3f S)
 
 
     Eigen::MatrixXf V = svd.matrixV();
-    Eigen::MatrixXf U = svd.matrixU().eval();
+    //TODO: it should be transpose
+    Eigen::MatrixXf U = svd.matrixU().eval(); 
 
     float smallest_singular_value = svd.singularValues().minCoeff();
 
@@ -197,7 +198,52 @@ __global__ static void calculate_rotation_matrix(const rxmesh::Context    contex
 
 
 
+/* compute all entries of bMatrix parallely */
+template <typename T, uint32_t blockThreads>
+__global__ static void calculate_b(const rxmesh::Context    context,
+                                          rxmesh::VertexAttribute<T> original_coords, // [num_coord, 3]
+                                          rxmesh::DenseMatrix<T>  rot_mat, // [num_coord, 9]
+                                          rxmesh::SparseMatrix<T> weight_mat, // [num_coord, num_coord]
+                                          rxmesh::MatrixXf<T> bMatrix) // [num_coord, 3]
+{
+    auto init_lambda = [&](VertexHandle v_id, VertexIterator& vv) {
+        // variable to store ith entry of bMatrix
+        Eigen::Vector3d bi(0.0f, 0.0f, 0.0f);
 
+        // get rotation matrix for ith vertex
+        Eigen::Matrix3f Ri = Eigen::Matrix3f::Zero(3,3)
+
+        for (int i=0;i<3;i++) {
+            for (int j = 0; j < 3; j++)
+                Ri(i,j) = rot_mat(v_id, i * 3 + j);
+        }
+
+        for (int nei_index = 0; nei_index < vv.size();nei_index++) 
+        {
+            // get weight vector
+            Eigen::VectorXf w = weight_mat(v_id, vv[nei_index]); 
+
+            // get rotation matrix for neightbor j
+            Eigen::Matrix3f Rj = Eigen::Matrix3f::Zero(3,3)
+            for (int i = 0; i < 3; i++) 
+                for (int j = 0; j < 3; j++)
+                    Rj(i,j) = rot_mat(vv[nei_index], i * 3 + j);
+            
+            
+            Eigen::Matrix3f rot_add = Ri + Rj
+            
+            // find coord difference
+            Eigen::Vector3f vert_diff = original_coords(vid) - original_coords(vv[nei_index])
+            
+            bi += 0.5 * w * rot_add * vert_diff
+        }
+        bMatrix[vid] = bi
+    };
+    auto                block = cooperative_groups::this_thread_block();
+    Query<blockThreads> query(context);
+    ShmemAllocator      shrd_alloc;
+    query.dispatch<Op::VV>(block, shrd_alloc, init_lambda);
+}
 
 
 
