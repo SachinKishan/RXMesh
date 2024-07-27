@@ -229,12 +229,13 @@ __global__ static void calculate_b(const rxmesh::Context    context,
                 for (int j = 0; j < 3; j++)
                     Rj(i,j) = rot_mat(vv[nei_index], i * 3 + j);
             
-            
+            // find rotation addition 
             Eigen::Matrix3f rot_add = Ri + Rj
             
             // find coord difference
             Eigen::Vector3f vert_diff = original_coords(vid) - original_coords(vv[nei_index])
             
+            // update bi
             bi += 0.5 * w * rot_add * vert_diff
         }
         bMatrix[vid] = bi
@@ -245,6 +246,27 @@ __global__ static void calculate_b(const rxmesh::Context    context,
     query.dispatch<Op::VV>(block, shrd_alloc, init_lambda);
 }
 
+
+/* compute system matrix rows parallely (L from eq9) */
+template <typename T, uint32_t blockThreads>
+__global__ static void calculate_system_matrix(const rxmesh::Context    context,
+                                          rxmesh::SparseMatrix<T> weight_mat, // [num_coord, num_coord]
+                                          rxmesh::SparseMatrix<T> L) // [num_coord, num_coord]
+{
+    auto init_lambda = [&](VertexHandle v_id, VertexIterator& vv) {
+        for (int nei_index = 0; nei_index < vv.size();nei_index++) 
+        {
+            L(v_id, v_id) += weight_mat(v_id, vv[nei_index])
+            L(v_id, vv[nei_index]) -= weight_mat(v_id, vv[nei_index])
+        }
+
+    };
+    
+    auto                block = cooperative_groups::this_thread_block();
+    Query<blockThreads> query(context);
+    ShmemAllocator      shrd_alloc;
+    query.dispatch<Op::VV>(block, shrd_alloc, init_lambda);
+}
 
 
 int main(int argc, char** argv)
@@ -318,10 +340,76 @@ int main(int argc, char** argv)
                                                  rot_mat,
                                                  weight_matrix);
                                                  */
-                                                 
+    
+    /*------------------step 2---------------------*/
+    /**  Calculate bMatrix */
+    uint32_t num_vertices = rx.get_num_vertices();
 
     
+    bMatrix = Eigen::MatrixXd::Zero(num_vertices, 3);
 
+    // call function to calculate bMatrix entries parallely
+     rxmesh::LaunchBox<CUDABlockSize> launch_box_bMatrix;
+     rx.prepare_launch_box(
+         {rxmesh::Op::VV},
+         launch_box_bMatrix,
+         (void*)calculate_b<float, CUDABlockSize>);
+
+     calculate_b<float, CUDABlockSize>
+         <<<launch_box_bMatrix.blocks,
+            launch_box_bMatrix.num_threads,
+            launch_box_bMatrix.smem_bytes_dyn>>>(rx.get_context(), 
+                                                 changed_vertex_pos, 
+                                                 rot_mat, 
+                                                 weight_matrix, 
+                                                 *bMatrix);
+
+    /** Calculate System Matrix L */ 
+    systemMatrix = Eigen::MatrixXd::Zero(num_vertices, num_vertices);
+
+    // VertexAttribute that will store 
+    auto constraints = *rx.add_vertex_attribute<float>("FixedVertices", 1);
+
+    // call function to calculate L Matrix entries parallely
+     rxmesh::LaunchBox<CUDABlockSize> launch_box_L;
+     rx.prepare_launch_box(
+         {rxmesh::Op::VV},
+         launch_box_L,
+         (void*)calculate_system_matrix<float, CUDABlockSize>);
+
+     calculate_system_matrix<float, CUDABlockSize>
+         <<<launch_box_L.blocks,
+            launch_box_L.num_threads,
+            launch_box_L.smem_bytes_dyn>>>(rx.get_context(),
+                                                 weight_matrix, 
+                                                 *systemMatrix);
+
+    // incorporating constraints. Keep the static and user modified vertices the same
+    //TODO: check with Ahmed if the following code is correct 
+    // (do I need to move matrices from GPU to CPU to run following code?)
+    for (int ids:constraints)
+    {
+        systemMatrix.row(ids).setZero()
+        systemMatrix(ids, ids) = 1
+    }
+
+    // solve eq9 by Cholesky factorization
+    auto coords = rx.get_input_vertex_coordinates();
+    std::shared_ptr<DenseMatrix<float>> X_mat = coords->to_matrix();
+
+     // Solving using CHOL
+    systemMatrix.pre_solve(PermuteMethod::NSTDIS);
+    systemMatrix.solve(bMatrix, *X_mat);
+
+    // move the results to the host
+    // if we use LU, the data will be on the host and we should not move the
+    // device to the host
+    X_mat->move(rxmesh::DEVICE, rxmesh::HOST);
+
+    // copy the results to attributes
+    coords->from_matrix(X_mat.get());
+    // visualize new position
+    rx.get_polyscope_mesh()->updateVertexPositions(*coords);
 
 
 #if USE_POLYSCOPE
