@@ -27,16 +27,33 @@ int main(int argc, char** argv)
 
     DenseMatrix<cuComplex> eb(rx, number_of_vertices, 1);
     DenseMatrix<cuComplex> u(rx, number_of_vertices, 1);
-    DenseMatrix<cuComplex> T3(rx, number_of_vertices, 1);
     DenseMatrix<cuComplex> T1(rx, number_of_vertices, 1);
+
     DenseMatrix<cuComplex> y(rx, number_of_vertices, 1);
+
+
     SparseMatrix<cuComplex> B(rx);
     SparseMatrix<cuComplex> L(rx);
 
+    uint32_t num_bd_vertices = 0;
+
+    rx.for_each_vertex(
+        HOST,
+        [&](const VertexHandle& vh) {
+            if (boundaryVertices(vh)) {
+                num_bd_vertices++;
+            }
+        },
+        NULL,
+        false);
+
+
+
     rx.for_each_vertex
-    (rxmesh::DEVICE,[B, eb, boundaryVertices] __device__(const rxmesh::VertexHandle vh) mutable
+    (rxmesh::DEVICE,[B, eb, boundaryVertices, num_bd_vertices] __device__(const rxmesh::VertexHandle vh) mutable
     {
-        eb(vh, 0) = make_cuComplex(boundaryVertices(vh, 0) , 0.0f);
+        //we can add a divide for each entry by number of boundary vertices- TODO: Calculate vb
+        eb(vh, 0) = make_cuComplex(boundaryVertices(vh, 0)/num_bd_vertices , 0.0f);
         B(vh, vh) = make_cuComplex(boundaryVertices(vh, 0), 0.0f);
 
     });
@@ -55,20 +72,20 @@ int main(int argc, char** argv)
 
     rx.for_each_vertex(
         rxmesh::DEVICE,
-        [eb, B,T3,T2,T1] __device__(
+        [eb, B,T2,T1] __device__(
             const rxmesh::VertexHandle vh) mutable 
         {
-            T3(vh, 0) = cuCsubf(T1(vh,0), eb(vh,0));
+            T1(vh, 0) = cuCsubf(T1(vh,0), eb(vh,0));
 
         });
 
-    L.pre_solve(PermuteMethod::NSTDIS);
-    L.solve(T3, y); //Ly=T3
+    L.pre_solve(PermuteMethod::NSTDIS);//can be outside the loop
+    L.solve(T1, y); //Ly=T1
 
     y.multiply(1/y.norm2());
     u.copy_from(y);
 
-        
+    //conversion step
 
     rx.get_polyscope_mesh()->addVertexScalarQuantity("vBoundary", boundaryVertices);
 
