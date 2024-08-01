@@ -18,22 +18,54 @@ int main(int argc, char** argv)
 
     RXMeshStatic rx(STRINGIFY(INPUT_DIR) "bunnyhead.obj");
 
-    auto boundaryVertices = rx.add_vertex_attribute<int>("boundaryVertices", 1);
-    
-    rx.get_boundary_vertices(*boundaryVertices);
+    int  number_of_vertices = rx.get_num_vertices();
+    auto boundaryVertices = *rx.add_vertex_attribute<int>("boundaryVertices", 1);
 
-    DenseMatrix<cuComplex> eb(rx, rx.get_num_vertices(), 1);
+//    auto parameter_coords = *rx.add_vertex_attribute();
+
+    rx.get_boundary_vertices(boundaryVertices);
+
+    DenseMatrix<cuComplex> eb(rx, number_of_vertices, 1);
+    DenseMatrix<cuComplex> u(rx, number_of_vertices, 1);
+    DenseMatrix<cuComplex> T3(rx, number_of_vertices, 1);
+    SparseMatrix<cuComplex> B(rx);
 
     rx.for_each_vertex
-    (rxmesh::DEVICE,[eb] __device__(const rxmesh::VertexHandle vh) 
+    (rxmesh::DEVICE,[B, eb, boundaryVertices] __device__(const rxmesh::VertexHandle vh) mutable
     {
-        eb(vh, 0) = make_cuComplex(1.0f, 1.0f);
+        eb(vh, 0) = make_cuComplex(boundaryVertices(vh, 0) , 0.0f);
+        B(vh, vh) = make_cuComplex(boundaryVertices(vh, 0), 0.0f);
 
     });
 
-    //vertex_color.move(rxmesh::DEVICE, rxmesh::HOST);
+    B.move(rxmesh::DEVICE, rxmesh::HOST);
+    eb.move(rxmesh::DEVICE, rxmesh::HOST);
 
-    rx.get_polyscope_mesh()->addVertexScalarQuantity("vBoundary", *boundaryVertices);
+    //
+    // S = [B- (1/Vb) * ebebT];
+
+    cuComplex T2 = eb.dot(u);
+    
+    rx.for_each_vertex(
+        rxmesh::DEVICE,
+        [u, eb, B,T3,T2] __device__(
+            const rxmesh::VertexHandle vh) mutable 
+        {
+            cuComplex T1 = make_cuComplex(B(vh, vh).x * u(vh, 0).x,
+                                          B(vh, vh).y * u(vh, 0).y);
+
+            
+            T3(vh,0)= cuCsubf(T1,cuCmulf(T2, eb(vh, 0)));
+
+        });
+
+    
+
+    
+
+
+
+    rx.get_polyscope_mesh()->addVertexScalarQuantity("vBoundary", boundaryVertices);
 
 
 
